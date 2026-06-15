@@ -7,30 +7,6 @@ from sqlmodel import Session, select
 from backend.database import engine
 from backend.models import Application, ApplicationStatus, Config, CoverLetter, Job
 
-_DEFAULT_PROFILE = {
-    "name": "Maik Bender",
-    "email": "maik.bender.nr240@gmail.com",
-    "phone": "01522-9482230",
-    "address": "Halkettstr. 7, 24939 Flensburg",
-    "degree": "B.Sc. Wirtschaftsinformatik (Hochschule Flensburg, ~06/2026)",
-    "background": "KFZ-Meister mit Ausbilderschein → danach Studium der Wirtschaftsinformatik",
-    "motivation": "Prozesse effizienter gestalten, digitale Transformation, datenbasierte Lösungen",
-}
-
-_DEFAULT_PREFS = {
-    "extra_prompt": "",
-    "reference_letter": "",
-    "ai_score_prompt": "",
-    "min_score_display": 0,
-    "ollama_model": "qwen2.5:14b",
-    "auto_search_hours": 0,
-    "auto_dismiss_days": 0,
-    "ai_min_score": 40,
-    "last_search_ts": "",
-    "last_search_new": 0,
-    "new_since_ts": "",
-    "cv_pptx_path": "",
-}
 
 
 def _get_config(session: Session) -> Config:
