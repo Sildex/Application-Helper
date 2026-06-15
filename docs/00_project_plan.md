@@ -32,4 +32,4 @@
 - [03_architecture.md](03_architecture.md) – Systemarchitektur & Komponentenentscheidungen
 - [04_data_model.md](04_data_model.md) – DB-Schema *(noch nicht erstellt)*
 - [05_api_research.md](05_api_research.md) – Job-API-Evaluation
-- [06_user_profile.md](06_user_profile.md) – Extrahiertes User-Profil (aus CV)
+- `private/06_user_profile.md` – Extrahiertes User-Profil (aus CV) *(nicht im Repo)*

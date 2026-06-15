@@ -197,6 +197,22 @@ def _pill(text: str, fg: str, bg: str) -> QLabel:
     return lbl
 
 
+def _section_toggle_btn(text: str, dot_col: str) -> QPushButton:
+    """Checkable button styled as a collapsible section header (▾ expanded / ▸ collapsed)."""
+    btn = QPushButton(f"▾  {text}")
+    btn.setCheckable(True)
+    btn.setChecked(True)
+    btn.setFixedHeight(22)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; border: none; text-align: left; "
+        f"padding: 0 2px; color: {P['text3']}; font-size: 11px; font-weight: 700; "
+        f"letter-spacing: 1px; }}"
+        f"QPushButton:hover {{ color: {dot_col}; }}"
+    )
+    return btn
+
+
 def _section_header(text: str, dot_col: str) -> QWidget:
     w = QWidget()
     w.setStyleSheet("background: transparent;")

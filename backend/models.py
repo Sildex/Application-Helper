@@ -23,6 +23,7 @@ class JobSource(str, Enum):
     ba = "ba"
     adzuna = "adzuna"
     arbeitnow = "arbeitnow"
+    himalayas = "himalayas"
 
 
 class Job(SQLModel, table=True):
@@ -42,6 +43,7 @@ class Job(SQLModel, table=True):
     posted_at: Optional[datetime] = None
     fetched_at: datetime = Field(default_factory=datetime.utcnow)
     extra_data: Optional[str] = None  # JSON: industry, work_time, contract, tags, remote
+    workspace: str = Field(default="default", index=True)
 
 
 class Application(SQLModel, table=True):

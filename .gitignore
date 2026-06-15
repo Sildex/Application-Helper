@@ -1,7 +1,18 @@
 # Local data & secrets
 private/
 data/
+Bewerbungsunterlagen/
 .env
+docs/06_user_profile.md
+
+# Claude internal config
+.claude/
+
+# Temp/debug scripts
+debug_pdf.py
+fix_strings.py
+fix_tex.py
+test_latex.py
 
 # Build output
 dist/

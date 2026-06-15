@@ -16,7 +16,7 @@ Eine Desktop-/Web-Applikation, die mithilfe von KI passende Stellenanzeigen find
 
 | Stakeholder | Rolle | Ziel |
 |---|---|---|
-| Maik Bender | Primärnutzer (Bewerber) | Schnell & effizient bewerben |
+| Bewerber | Primärnutzer | Schnell & effizient bewerben |
 | Potenzielle Arbeitgeber | Indirekt | Erhalten qualifizierte Bewerbungen |
 
 ---

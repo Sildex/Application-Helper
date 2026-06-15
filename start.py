@@ -1,4 +1,4 @@
-"""AutoApply – Desktop App"""
+"""Application Helper – Desktop App"""
 import os
 import sys
 

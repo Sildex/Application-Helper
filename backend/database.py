@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 
 if getattr(sys, "frozen", False):
-    _BASE = Path(os.environ.get("APPDATA", Path.home())) / "AutoApply"
+    _BASE = Path(os.environ.get("APPDATA", Path.home())) / "Application Helper"
 else:
     _BASE = Path(__file__).parent.parent
 
@@ -28,6 +28,7 @@ def _migrate():
             ("jobs",         "extra_data", "TEXT"),
             ("applications", "notes",      "TEXT"),
             ("applications", "viewed",     "INTEGER DEFAULT 0"),
+            ("jobs",         "workspace",  "TEXT DEFAULT 'default'"),
         ]:
             try:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}"))

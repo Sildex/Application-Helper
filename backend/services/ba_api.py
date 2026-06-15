@@ -64,7 +64,7 @@ def _parse_job(raw: dict) -> Optional[dict]:
     }
 
 
-async def search_jobs(keywords: str, location: str, radius_km: int = 0, max_results: int = 25) -> list[dict]:
+async def search_jobs(keywords: str, location: str = "", radius_km: int = 0, max_results: int = 25) -> list[dict]:
     jobs: list[dict] = []
     page = 1
     page_size = min(25, max_results)
@@ -73,11 +73,13 @@ async def search_jobs(keywords: str, location: str, radius_km: int = 0, max_resu
         while len(jobs) < max_results:
             params = {
                 "was": keywords,
-                "wo": location,
                 "angebotsart": 1,
                 "size": page_size,
                 "page": page,
+                "sortierungsfeld": 2,  # sort by date, not IP-proximity
             }
+            if location:
+                params["wo"] = location
             if radius_km > 0:
                 params["umkreis"] = radius_km
 

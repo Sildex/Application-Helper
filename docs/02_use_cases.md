@@ -7,7 +7,7 @@
 
 ## Akteure
 
-- **User (Bewerber):** Maik – möchte sich effizient bewerben
+- **User (Bewerber):** möchte sich effizient bewerben
 - **KI-System:** Claude API – generiert Anschreiben, bewertet Relevanz
 - **Job-APIs:** Externe Dienste (LinkedIn, Indeed, etc.)
 

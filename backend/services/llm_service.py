@@ -9,26 +9,9 @@ import ollama
 
 _llm_log: list[dict] = []
 
-_PROFILE_CONTEXT = """
-Bewerber: Maik Bender
-Abschluss: B.Sc. Wirtschaftsinformatik (Hochschule Flensburg, voraussichtlich 01.06.2026)
-Hintergrund: KFZ-Meister mit Ausbilderschein → danach Studium der Wirtschaftsinformatik. Kennt operative Betriebsprozesse aus der Praxis (Automotive/Werkstatt).
-Standort: Flensburg – bewirbt sich in ganz Deutschland, Österreich, Schweiz, Luxemburg sowie Remote.
-Motivation: Prozesse effizienter gestalten und automatisieren, digitale Transformation, datenbasierte Lösungen entwickeln.
-Stärken: Analytisches Denken, EDV-Kenntnisse, Teamfähigkeit, Kommunikation, praktisches technisches Verständnis.
-Sprachen: Deutsch (fließend), Englisch (Grundkenntnisse).
-Bevorzugte Branchen: Öffentlicher Dienst / Verwaltung, IT-Wirtschaft-Schnittstelle, IT-Mechatronik-Schnittstelle.
-Karrierestufe: Berufseinsteiger – bewirbt sich auch auf Stellen mit Erfahrungsanforderungen.
+_PROFILE_CONTEXT = ""
 
-NICHT geeignet für: reine Softwareentwicklung/Programmierung, ERP/SAP-Stellen, Vertrieb/Call Center.
-GEEIGNET für: IT-Projektmanagement, Business Analyst, Prozessmanagement, Digitalisierung (inkl. Verwaltungsdigitalisierung), IT-Koordination, Industrie 4.0, Qualitätsmanagement mit IT-Bezug.
-""".strip()
-
-_SYSTEM_PROMPT = f"""Du bist ein Bewerbungsassistent. Du kennst das folgende Bewerber-Profil:
-
-{_PROFILE_CONTEXT}
-
-Antworte immer auf Deutsch. Sei präzise und halte dich an das geforderte Format."""
+_SYSTEM_PROMPT = "Du bist ein Bewerbungsassistent. Antworte immer auf Deutsch. Sei präzise und halte dich an das geforderte Format."
 
 
 def get_log() -> list[dict]:
@@ -95,7 +78,6 @@ def generate_cover_letter(
                     f"Vorgaben:\n"
                     f"- Ton: professionell und direkt, keine Floskeln\n"
                     f"- Struktur: Einstieg (konkreter Bezug zur Stelle) → Stärken/Mehrwert → Abschluss\n"
-                    f"- KFZ-Meister-Hintergrund als Brücke nutzen: praktisches Prozessdenken, Kenntnis realer Betriebsabläufe\n"
                     f"- Konkreten Bezug zu den Anforderungen der Stelle herstellen (nicht generisch)\n"
                     f"- Kernbotschaft: Prozesse effizienter gestalten und digitalisieren\n"
                     f"- Genau 3 Absätze + kurze Schlussformel, ca. 200–250 Wörter\n"

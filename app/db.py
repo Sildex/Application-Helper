@@ -4,9 +4,36 @@ from datetime import datetime, timedelta
 
 from sqlmodel import Session, select
 
+from app.filters import RE_TITLE_EXCLUDE as _RE_TITLE_EXCLUDE
 from backend.database import engine
 from backend.models import Application, ApplicationStatus, Config, CoverLetter, Job
 
+_DEFAULT_PROFILE = {
+    "name": "",
+    "email": "",
+    "phone": "",
+    "address": "",
+    "degree": "",
+    "background": "",
+    "motivation": "",
+}
+
+_DEFAULT_PREFS = {
+    "extra_prompt": "",
+    "reference_letter": "",
+    "ai_score_prompt": "",
+    "min_score_display": 45,
+    "ollama_model": "qwen2.5:14b",
+    "auto_search_hours": 0,
+    "auto_dismiss_days": 0,
+    "ai_min_score": 40,
+    "last_search_ts": "",
+    "last_search_new": 0,
+    "new_since_ts": "",
+    "cv_pptx_path": "",
+    "adzuna_app_id": "",
+    "adzuna_app_key": "",
+}
 
 
 def _get_config(session: Session) -> Config:
@@ -39,6 +66,17 @@ def save_settings(profile: dict, prefs: dict):
         session.commit()
 
 
+def get_workspaces() -> list[str]:
+    with Session(engine) as session:
+        rows = session.exec(select(Job.workspace)).all()
+        seen = []
+        for w in rows:
+            v = w or "default"
+            if v not in seen:
+                seen.append(v)
+        return seen or ["default"]
+
+
 def get_pipeline_counts() -> dict:
     with Session(engine) as session:
         apps = session.exec(select(Application)).all()
@@ -58,8 +96,10 @@ def get_jobs(
     search_text: str = "",
     sort: str = "score",  # "score" | "date" | "company"
     ai_only: bool = False,
-    new_only: bool = False,    # only jobs fetched since last search
-    status_filter: str = "",   # "applied" | "interview" | "offer" | "rejected"
+    new_only: bool = False,      # only jobs fetched since last search
+    unviewed_only: bool = False, # only jobs not yet opened/viewed
+    status_filter: str = "",     # "applied" | "interview" | "offer" | "rejected" | "!applied"
+    workspace: str = "default",  # workspace name, "" = all workspaces
 ) -> list[dict]:
     with Session(engine) as session:
         jobs = session.exec(select(Job)).all()
@@ -87,11 +127,13 @@ def get_jobs(
         result = []
         for job in jobs:
             app = app_map.get(job.id)
+            if _RE_TITLE_EXCLUDE.search(job.title or ""): continue
             if job.relevance_score is not None and job.relevance_score < min_score: continue
             if category and job.category.value != category: continue
             if not show_dismissed and app and app.dismissed: continue
             if view == "saved" and not (app and app.saved): continue
             if view == "applied" and not (app and app.status == ApplicationStatus.applied): continue
+            if workspace and (job.workspace or "default") != workspace: continue
             extra = {}
             if job.extra_data:
                 try:
@@ -130,7 +172,11 @@ def get_jobs(
             result = [r for r in result if (r["relevance_reason"] or "").startswith("[AI]")]
         if new_only:
             result = [r for r in result if r.get("is_new")]
-        if status_filter:
+        if unviewed_only:
+            result = [r for r in result if not r.get("viewed")]
+        if status_filter == "!applied":
+            result = [r for r in result if r["status"] != "applied"]
+        elif status_filter:
             result = [r for r in result if r["status"] == status_filter]
         if search_text:
             q = search_text.lower()
@@ -159,12 +205,16 @@ def toggle_save(job_id: int) -> bool:
 
 
 def force_dismiss(job_id: int):
-    """Dismiss unconditionally (does not toggle)."""
+    """Dismiss unconditionally — creates Application record if missing."""
     with Session(engine) as session:
         app = session.exec(select(Application).where(Application.job_id == job_id)).first()
-        if app and not app.dismissed:
-            app.dismissed = True
-            session.add(app)
+        if app:
+            if not app.dismissed:
+                app.dismissed = True
+                session.add(app)
+                session.commit()
+        else:
+            session.add(Application(job_id=job_id, dismissed=True))
             session.commit()
 
 
@@ -306,28 +356,6 @@ def save_last_search(new_count: int):
         session.commit()
 
 
-def dismiss_empty_description_jobs(min_chars: int = 80) -> int:
-    """Dismiss new/unsaved jobs whose description is missing or too short."""
-    with Session(engine) as session:
-        jobs = session.exec(select(Job)).all()
-        app_map = {
-            a.job_id: a
-            for a in session.exec(select(Application)).all()
-        }
-        count = 0
-        for job in jobs:
-            app = app_map.get(job.id)
-            if not app or app.dismissed or app.saved:
-                continue
-            if app.status != ApplicationStatus.new:
-                continue
-            desc = (job.description or "").strip()
-            if len(desc) < min_chars:
-                app.dismissed = True
-                session.add(app)
-                count += 1
-        session.commit()
-    return count
 
 
 def clear_all_jobs():
@@ -339,23 +367,53 @@ def clear_all_jobs():
         session.commit()
 
 
+def cleanup_excluded_titles() -> int:
+    """Dismiss all existing DB jobs whose titles match the exclude filter. Returns count."""
+    from backend.models import Job
+    dismissed = 0
+    with Session(engine) as session:
+        jobs = session.exec(select(Job)).all()
+        for job in jobs:
+            if not _RE_TITLE_EXCLUDE.search(job.title or ""):
+                continue
+            app = session.exec(select(Application).where(Application.job_id == job.id)).first()
+            if app and (app.dismissed or app.saved):
+                continue
+            if not app:
+                app = Application(job_id=job.id, dismissed=True)
+                session.add(app)
+            else:
+                app.dismissed = True
+                session.add(app)
+            dismissed += 1
+        if dismissed:
+            session.commit()
+    return dismissed
+
+
 def get_jobs_for_ai_scoring(min_score: int = 40) -> list[dict]:
-    """Jobs with rule_score >= min_score that haven't been AI-scored yet."""
+    """Jobs with rule_score >= min_score, not dismissed, not yet AI-scored."""
     with Session(engine) as session:
         jobs = session.exec(
             select(Job)
             .where(Job.relevance_score >= min_score)
             .order_by(Job.relevance_score.desc())
         ).all()
+        app_map = {
+            a.job_id: a
+            for a in session.exec(select(Application)).all()
+        }
         return [
             {
                 "id": j.id,
                 "title": j.title,
                 "company": j.company or "",
+                "location": j.location or "",
                 "description": j.description or "",
             }
             for j in jobs
             if not (j.relevance_reason or "").startswith("[AI]")
+            and not (app_map.get(j.id) and app_map[j.id].dismissed)
         ]
 
 
@@ -376,6 +434,50 @@ def update_job_description(job_id: int, description: str):
             job.description = description
             session.add(job)
             session.commit()
+
+
+def reset_ai_scores() -> int:
+    """Re-apply rule scorer to all AI-scored jobs, clearing the AI score so they can be re-scored."""
+    from backend.services.scorer import score_job as rule_score, detect_category
+    updated = 0
+    with Session(engine) as session:
+        jobs = session.exec(select(Job)).all()
+        for job in jobs:
+            if not (job.relevance_reason or "").startswith("[AI]"):
+                continue
+            result = rule_score(
+                job.title or "", job.description or "",
+                job.company or "", job.location or "",
+            )
+            job.relevance_score  = result["score"]
+            job.relevance_reason = result["reason"]
+            job.category         = detect_category(job.title or "", job.description or "")
+            session.add(job)
+            updated += 1
+        session.commit()
+    return updated
+
+
+def rescore_all_jobs() -> int:
+    """Re-apply rule scorer to all jobs not yet AI-scored. Returns count updated."""
+    from backend.services.scorer import score_job as rule_score, detect_category
+    updated = 0
+    with Session(engine) as session:
+        jobs = session.exec(select(Job)).all()
+        for job in jobs:
+            if (job.relevance_reason or "").startswith("[AI]"):
+                continue
+            result = rule_score(
+                job.title or "", job.description or "",
+                job.company or "", job.location or "",
+            )
+            job.relevance_score  = result["score"]
+            job.relevance_reason = result["reason"]
+            job.category         = detect_category(job.title or "", job.description or "")
+            session.add(job)
+            updated += 1
+        session.commit()
+    return updated
 
 
 def get_cover_letter(job_id: int) -> str | None:

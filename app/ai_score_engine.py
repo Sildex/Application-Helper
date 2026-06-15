@@ -13,7 +13,7 @@ from app.log import _log_activity
 from backend.services.ai_scorer import score_job_ai
 
 _DECISIONS_FILE = (
-    Path(os.environ.get("APPDATA", Path.home())) / "AutoApply" / "data" / "ai_decisions.json"
+    Path(os.environ.get("APPDATA", Path.home())) / "Application Helper" / "data" / "ai_decisions.json"
     if getattr(sys, "frozen", False)
     else Path(__file__).parent.parent / "data" / "ai_decisions.json"
 )
@@ -103,7 +103,11 @@ def _ensure_ollama() -> bool:
     except Exception:
         pass
     try:
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
         for _ in range(15):
             time.sleep(1)
             try:
@@ -141,6 +145,7 @@ def _run(jobs, model, profile, custom_prompt, on_job_done, on_complete):
         result = score_job_ai(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), profile, model, custom_prompt,
+            location=job.get("location", ""),
         )
         elapsed = time.time() - t0
         times.append(elapsed)

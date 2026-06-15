@@ -1,4 +1,4 @@
-"""AutoApply – main window, debug console, settings dialog."""
+"""Application Helper – main window, debug console, settings dialog."""
 import asyncio
 import csv
 import html
@@ -29,7 +29,7 @@ from app import db, search_engine, ai_score_engine
 from app.log import _ACTIVITY_LOG, _log_activity
 from app.theme import (
     CAT, MONO_FONT, P, _btn, _card, _label, _mono, _pill,
-    _pipe_qss, _section_header, _sep, _qss, score_col, strip_html,
+    _pipe_qss, _section_header, _section_toggle_btn, _sep, _qss, score_col, strip_html,
 )
 from app.widgets import JobCard, MiniGraph, ViewToggle
 from backend.database import init_db
@@ -178,8 +178,13 @@ class MainWindow(QMainWindow):
         self._bew_progress_sig.connect(self._on_bew_progress)
         self._bew_pdf_ready.connect(self._render_bew_pdf)
         self._ai_render_timer = QTimer(self); self._ai_render_timer.setSingleShot(True)
-        self._ai_render_timer.timeout.connect(self._render_list)
-        self.setWindowTitle("AutoApply")
+        def _ai_render():
+            self._chip_new.setChecked(False)
+            self._quick_new_only = False
+            self._load_jobs()
+            self._update_filter_btn()
+        self._ai_render_timer.timeout.connect(_ai_render)
+        self.setWindowTitle("Application Helper")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
 
@@ -192,15 +197,21 @@ class MainWindow(QMainWindow):
         self._active_tab         = 0
         self._top_jobs_tick      = 0
         self._quick_new_only     = False
+        self._quick_unviewed     = False
         self._quick_status       = ""
+        self._saved_sub_filter   = ""
+        self._workspace          = "default"
         self._last_dismissed_id: int | None = None
         self._debug_win          = None
         self._total_jobs_cache   = 0
         self._ai_idle_tick       = 0
         self._ai_unscored_cache  = 0
 
-        # bewerbung state
-        self._pptx_path             = ""
+        # bewerbung state — always use Bewerbungsunterlagen folder
+        self._latex_dir = os.path.normpath(os.path.join(
+            os.path.expanduser("~"), "Documents", "Claude Code",
+            "Application Helper", "Bewerbungsunterlagen"
+        ))
         self._bew_creating          = False
         self._bewerbung_paths: dict[int, str] = {}
         self._current_bew_job_id    = 0
@@ -209,7 +220,9 @@ class MainWindow(QMainWindow):
 
         self._build()
         self._run_auto_dismiss()
+        threading.Thread(target=db.cleanup_excluded_titles, daemon=True).start()
         self._load_jobs()
+        self._refresh_workspaces()
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_search)
@@ -277,13 +290,39 @@ class MainWindow(QMainWindow):
 
         self._top_dot = QLabel(" ●")
         self._top_dot.setStyleSheet(f"color: {P['green']}; font-size: 10px; background: transparent;")
-        brand = QLabel("AUTOAPPLY")
+        brand = QLabel("APPLICATION HELPER")
         brand.setStyleSheet(
             f"color: {P['text']}; font-size: 11px; font-weight: 700; "
             f"letter-spacing: 3px; font-family: '{MONO_FONT}'; background: transparent;"
         )
         lay.addWidget(self._top_dot)
         lay.addWidget(brand)
+        lay.addSpacing(20)
+
+        # Applied counter pill
+        self._lbl_applied_count = QLabel("✓  0  APPLIED")
+        self._lbl_applied_count.setStyleSheet(
+            f"color: {P['green']}; background: {P['green_bg']}; "
+            f"font-size: 11px; font-weight: 700; font-family: '{MONO_FONT}'; "
+            f"border-radius: 5px; padding: 2px 10px;"
+        )
+        lay.addWidget(self._lbl_applied_count)
+        lay.addSpacing(16)
+
+        # Workspace selector
+        self._workspace_combo = QComboBox()
+        self._workspace_combo.setFixedHeight(24)
+        self._workspace_combo.setMinimumWidth(110)
+        self._workspace_combo.setStyleSheet(
+            f"QComboBox {{ background: {P['card2']}; color: {P['text2']}; "
+            f"border: 1px solid {P['border2']}; border-radius: 5px; "
+            f"font-size: 11px; font-family: '{MONO_FONT}'; padding: 0 8px; }}"
+            f"QComboBox::drop-down {{ border: none; width: 16px; }}"
+            f"QComboBox QAbstractItemView {{ background: {P['card2']}; color: {P['text']}; "
+            f"selection-background-color: {P['indigo_bg']}; border: 1px solid {P['border2']}; }}"
+        )
+        self._workspace_combo.currentTextChanged.connect(self._on_workspace_change)
+        lay.addWidget(self._workspace_combo)
         lay.addStretch()
 
         sep = QLabel("  |  ")
@@ -304,12 +343,15 @@ class MainWindow(QMainWindow):
         lay.setSpacing(0)
 
         # ── Search ────────────────────────────────────────────────────────────
-        lay.addWidget(_section_header("SEARCH ENGINE", P['indigo']))
-        lay.addSpacing(5)
+        self._hdr_search = _section_toggle_btn("SEARCH ENGINE", P['indigo'])
+        lay.addWidget(self._hdr_search); lay.addSpacing(5)
+
+        self._search_body = QWidget(); self._search_body.setStyleSheet("background: transparent;")
+        search_lay = QVBoxLayout(self._search_body); search_lay.setContentsMargins(0, 0, 0, 0); search_lay.setSpacing(0)
+
         self._btn_search = _btn("Start Search", P['indigo'], P['indigo_d'], height=34, font_size=13)
         self._btn_search.clicked.connect(self._start_search)
-        lay.addWidget(self._btn_search)
-        lay.addSpacing(4)
+        search_lay.addWidget(self._btn_search); search_lay.addSpacing(4)
 
         self._progress = QProgressBar()
         self._progress.setFixedHeight(26)
@@ -327,18 +369,17 @@ class MainWindow(QMainWindow):
         self._btn_cancel.clicked.connect(self._cancel_search)
         prog_row = QHBoxLayout(); prog_row.setSpacing(4)
         prog_row.addWidget(self._progress, 1); prog_row.addWidget(self._btn_cancel)
-        lay.addLayout(prog_row); lay.addSpacing(3)
+        search_lay.addLayout(prog_row); search_lay.addSpacing(3)
 
         phase_row = QHBoxLayout(); phase_row.setSpacing(0)
         self._lbl_phase = _mono("IDLE", size=10, color=P['text3'])
         self._lbl_search_meta = _mono("", size=10, color=P['text3'])
         self._lbl_search_meta.setAlignment(Qt.AlignmentFlag.AlignRight)
         phase_row.addWidget(self._lbl_phase, 1); phase_row.addWidget(self._lbl_search_meta)
-        lay.addLayout(phase_row); lay.addSpacing(2)
+        search_lay.addLayout(phase_row); search_lay.addSpacing(2)
         self._lbl_last_search = _mono("Last search: never", size=10, color=P['text3'])
-        lay.addWidget(self._lbl_last_search); lay.addSpacing(5)
+        search_lay.addWidget(self._lbl_last_search); search_lay.addSpacing(5)
 
-        # stats strip (visible during search, hidden when idle)
         self._stats_frame = QFrame(); self._stats_frame.setObjectName("sf")
         self._stats_frame.setStyleSheet(
             f"QFrame#sf {{ background: {P['card2']}; border-radius: 8px; border: 1px solid {P['border']}; }}"
@@ -351,24 +392,32 @@ class MainWindow(QMainWindow):
         self._st_saved    = self._stat_cell(sl, "NEW", "—")
         self._stat_vsep(sl)
         self._st_total    = self._stat_cell(sl, "TOTAL DB", "—")
-        lay.addWidget(self._stats_frame)
+        search_lay.addWidget(self._stats_frame)
         self._lbl_idle_db = _mono("", size=11, color=P['text3'])
-        lay.addWidget(self._lbl_idle_db)
+        search_lay.addWidget(self._lbl_idle_db)
         self._lbl_idle_db.hide()
-        lay.addSpacing(4)
+        search_lay.addSpacing(4)
 
         self._lbl_funnel = QLabel()
         self._lbl_funnel.setStyleSheet("background: transparent;")
         self._lbl_funnel.setTextFormat(Qt.TextFormat.RichText)
         self._lbl_funnel.setText(self._funnel_html({"new": 0, "applied": 0, "interview": 0, "offer": 0}))
-        lay.addWidget(self._lbl_funnel); lay.addSpacing(4)
+        search_lay.addWidget(self._lbl_funnel); search_lay.addSpacing(4)
 
+        self._hdr_search.toggled.connect(self._search_body.setVisible)
+        self._hdr_search.toggled.connect(
+            lambda on: self._hdr_search.setText("▾  SEARCH ENGINE" if on else "▸  SEARCH ENGINE")
+        )
+        lay.addWidget(self._search_body)
         lay.addSpacing(6)
         lay.addWidget(_sep()); lay.addSpacing(6)
 
         # ── AI Scorer ─────────────────────────────────────────────────────────
-        lay.addWidget(_section_header("AI SCORER", P['purple']))
-        lay.addSpacing(4)
+        self._hdr_ai = _section_toggle_btn("AI SCORER", P['purple'])
+        lay.addWidget(self._hdr_ai); lay.addSpacing(4)
+
+        self._ai_body = QWidget(); self._ai_body.setStyleSheet("background: transparent;")
+        ab = QVBoxLayout(self._ai_body); ab.setContentsMargins(0, 0, 0, 0); ab.setSpacing(0)
 
         self._ai_progress = QProgressBar()
         self._ai_progress.setFixedHeight(22); self._ai_progress.setRange(0, 100)
@@ -381,14 +430,14 @@ class MainWindow(QMainWindow):
             f"QProgressBar::chunk {{ border-radius: 4px; background: qlineargradient("
             f"x1:0,y1:0,x2:1,y2:0, stop:0 #4b0082, stop:0.5 #7b2fbe, stop:1 {P['purple']}); }}"
         )
-        lay.addWidget(self._ai_progress); lay.addSpacing(3)
+        ab.addWidget(self._ai_progress); ab.addSpacing(3)
 
         ai_info_row = QHBoxLayout(); ai_info_row.setSpacing(0)
         self._lbl_ai_phase = _mono("idle", size=10, color=P['text3'])
         self._lbl_ai_eta   = _mono("", size=10, color=P['text3'])
         self._lbl_ai_eta.setAlignment(Qt.AlignmentFlag.AlignRight)
         ai_info_row.addWidget(self._lbl_ai_phase, 1); ai_info_row.addWidget(self._lbl_ai_eta)
-        lay.addLayout(ai_info_row); lay.addSpacing(4)
+        ab.addLayout(ai_info_row); ab.addSpacing(4)
 
         self._ai_auto_enabled = False
         self._btn_ai_toggle = QPushButton("AUTO  OFF")
@@ -419,7 +468,13 @@ class MainWindow(QMainWindow):
         ai_btn_row.addWidget(self._btn_ai_toggle)
         ai_btn_row.addWidget(self._btn_ai_start, 1)
         ai_btn_row.addWidget(self._btn_ai_cancel)
-        lay.addLayout(ai_btn_row); lay.addSpacing(6)
+        ab.addLayout(ai_btn_row); ab.addSpacing(6)
+
+        self._hdr_ai.toggled.connect(self._ai_body.setVisible)
+        self._hdr_ai.toggled.connect(
+            lambda on: self._hdr_ai.setText("▾  AI SCORER" if on else "▸  AI SCORER")
+        )
+        lay.addWidget(self._ai_body)
         lay.addWidget(_sep()); lay.addSpacing(6)
 
         # ── Filter ────────────────────────────────────────────────────────────
@@ -429,8 +484,61 @@ class MainWindow(QMainWindow):
         self._view_toggle.changed.connect(self._on_view_change)
         lay.addWidget(self._view_toggle); lay.addSpacing(4)
 
-        # quick-filter chips
-        qf_row = QHBoxLayout(); qf_row.setSpacing(4)
+        # filter toggle header row
+        fhdr = QHBoxLayout(); fhdr.setSpacing(6)
+        self._btn_filter_toggle = QPushButton("Filters")
+        self._btn_filter_toggle.setFixedHeight(26)
+        self._btn_filter_toggle.setCheckable(True)
+        self._btn_filter_toggle.setChecked(False)
+        self._btn_filter_toggle.setStyleSheet(
+            f"QPushButton{{background:{P['card2']};color:{P['text2']};border-radius:5px;"
+            f"font-size:11px;font-weight:600;padding:0 12px;border:1px solid {P['border2']};}}"
+            f"QPushButton:checked{{background:{P['amber_bg']};color:{P['amber']};"
+            f"border-color:{P['amber']}55;}}"
+            f"QPushButton:hover{{background:{P['card3']};}}"
+        )
+        self._btn_filter_toggle.clicked.connect(self._toggle_filter_panel)
+        self._lbl_count = _mono("0 jobs", color=P['text3'])
+        self._lbl_count.setAlignment(Qt.AlignmentFlag.AlignRight)
+        fhdr.addWidget(self._btn_filter_toggle)
+        fhdr.addStretch()
+        fhdr.addWidget(self._lbl_count)
+        lay.addLayout(fhdr); lay.addSpacing(4)
+
+        # collapsible filter panel (hidden by default)
+        self._filter_panel = QWidget(); self._filter_panel.setStyleSheet("background: transparent;")
+        fp = QVBoxLayout(self._filter_panel); fp.setContentsMargins(0, 0, 0, 4); fp.setSpacing(4)
+
+        # saved sub-filter chips (only visible in Saved view, inside panel)
+        self._fp_saved_sub = QWidget(); self._fp_saved_sub.setStyleSheet("background: transparent;")
+        ssfl = QHBoxLayout(self._fp_saved_sub); ssfl.setContentsMargins(0, 0, 0, 0); ssfl.setSpacing(4)
+        def _sfchip(label):
+            b = QPushButton(label); b.setCheckable(True); b.setFixedHeight(26)
+            b.setStyleSheet(
+                f"QPushButton{{background:{P['card2']};color:{P['text3']};border-radius:5px;"
+                f"font-size:10px;font-weight:600;padding:0 8px;}}"
+                f"QPushButton:checked{{background:{P['green_bg']};color:{P['green']};"
+                f"border:1px solid {P['green']}55;}}"
+                f"QPushButton:hover{{background:{P['card3']};}}"
+            )
+            return b
+        self._sfchip_all       = _sfchip("All Saved")
+        self._sfchip_pending   = _sfchip("Not Applied")
+        self._sfchip_applied   = _sfchip("✓ Applied")
+        self._sfchip_interview = _sfchip("Interview")
+        self._sfchip_all.setChecked(True)
+        self._sfchip_all.clicked.connect(      lambda: self._on_saved_sub(""))
+        self._sfchip_pending.clicked.connect(  lambda: self._on_saved_sub("!applied"))
+        self._sfchip_applied.clicked.connect(  lambda: self._on_saved_sub("applied"))
+        self._sfchip_interview.clicked.connect(lambda: self._on_saved_sub("interview"))
+        for chip in (self._sfchip_all, self._sfchip_pending, self._sfchip_applied, self._sfchip_interview):
+            ssfl.addWidget(chip)
+        ssfl.addStretch()
+        self._fp_saved_sub.hide()
+        fp.addWidget(self._fp_saved_sub)
+
+        self._fp_chips_row = QWidget(); self._fp_chips_row.setStyleSheet("background: transparent;")
+        qf_row = QHBoxLayout(self._fp_chips_row); qf_row.setContentsMargins(0, 0, 0, 0); qf_row.setSpacing(4)
         def _qchip(label, tip=""):
             b = QPushButton(label); b.setCheckable(True); b.setFixedHeight(24)
             b.setToolTip(tip)
@@ -441,20 +549,23 @@ class MainWindow(QMainWindow):
                 f"QPushButton:hover{{background:{P['card3']};}}"
             )
             return b
-        self._chip_new       = _qchip("● Neu",      "Nur heute gefundene Jobs")
-        self._chip_interview = _qchip("Interview",  "Nur Jobs im Interview-Status")
+        self._chip_new       = _qchip("● New",      "Today's new jobs only")
+        self._chip_unviewed  = _qchip("Unviewed",   "Only jobs not yet opened")
+        self._chip_interview = _qchip("Interview",  "Interview status only")
         self._chip_new.clicked.connect(self._on_chip_new)
+        self._chip_unviewed.clicked.connect(self._on_chip_unviewed)
         self._chip_interview.clicked.connect(self._on_chip_interview)
         qf_row.addWidget(self._chip_new)
+        qf_row.addWidget(self._chip_unviewed)
         qf_row.addWidget(self._chip_interview)
         qf_row.addStretch()
-        lay.addLayout(qf_row); lay.addSpacing(4)
+        fp.addWidget(self._fp_chips_row)
 
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("Search title or company…")
         self._search_input.setFixedHeight(30)
         self._search_input.textChanged.connect(self._on_filter)
-        lay.addWidget(self._search_input); lay.addSpacing(4)
+        fp.addWidget(self._search_input)
 
         filter_row = QHBoxLayout(); filter_row.setSpacing(4)
         self._cat_combo = QComboBox()
@@ -466,7 +577,7 @@ class MainWindow(QMainWindow):
         self._sort_combo.addItem("Company ↑", "company")
         self._sort_combo.currentIndexChanged.connect(self._on_filter)
         filter_row.addWidget(self._cat_combo, 3); filter_row.addWidget(self._sort_combo, 2)
-        lay.addLayout(filter_row); lay.addSpacing(4)
+        fp.addLayout(filter_row)
 
         slider_row = QHBoxLayout(); slider_row.setSpacing(6)
         self._lbl_min_score = _mono("MIN SCORE  0", size=10, color=P['text3'])
@@ -476,7 +587,7 @@ class MainWindow(QMainWindow):
         self._score_slider.valueChanged.connect(self._on_score_slider)
         slider_row.addWidget(self._lbl_min_score)
         slider_row.addWidget(self._score_slider, 1)
-        lay.addLayout(slider_row); lay.addSpacing(3)
+        fp.addLayout(slider_row)
 
         _chk_style = (
             f"QCheckBox {{ color: {P['text3']}; font-size: 11px; spacing: 5px; }}"
@@ -491,13 +602,14 @@ class MainWindow(QMainWindow):
         self._chk_ai_only = QCheckBox("✦ AI only")
         self._chk_ai_only.setStyleSheet(_chk_style)
         self._chk_ai_only.stateChanged.connect(self._on_filter)
-        self._lbl_count = _mono("0 jobs", color=P['text3'])
-        self._lbl_count.setAlignment(Qt.AlignmentFlag.AlignRight)
         chk_row.addWidget(self._chk_dismissed)
         chk_row.addSpacing(10)
         chk_row.addWidget(self._chk_ai_only)
-        chk_row.addStretch(); chk_row.addWidget(self._lbl_count)
-        lay.addLayout(chk_row); lay.addSpacing(6)
+        chk_row.addStretch()
+        fp.addLayout(chk_row)
+
+        self._filter_panel.hide()
+        lay.addWidget(self._filter_panel); lay.addSpacing(2)
         lay.addWidget(_sep()); lay.addSpacing(4)
 
         # ── Job list ──────────────────────────────────────────────────────────
@@ -515,37 +627,14 @@ class MainWindow(QMainWindow):
         lay.addWidget(_sep()); lay.addSpacing(8)
 
         bot = QHBoxLayout(); bot.setSpacing(4)
-        self._btn_settings    = _btn("⚙",          P['card2'],   P['card3'],    height=28, font_size=12, fixed_width=32)
-        self._btn_settings.setToolTip("Settings")
-        self._btn_stats       = _btn("📊",          P['card2'],   P['card3'],    height=28, font_size=12, fixed_width=32)
-        self._btn_stats.setToolTip("Statistics")
         self._btn_dismiss_all = _btn("✕ Dismiss",   P['card2'],   P['card3'],    height=28, font_size=11)
         self._btn_dismiss_all.setToolTip("Dismiss all currently visible jobs")
-        self._btn_more        = _btn("⋮",           P['card2'],   P['card3'],    height=28, font_size=14, fixed_width=32)
-        self._btn_more.setToolTip("More options")
-        def _show_more_menu():
-            m = QMenu(self)
-            m.setStyleSheet(
-                f"QMenu {{ background: {P['card2']}; color: {P['text']}; "
-                f"border: 1px solid {P['border2']}; border-radius: 6px; padding: 4px; }}"
-                f"QMenu::item {{ padding: 6px 18px; border-radius: 4px; }}"
-                f"QMenu::item:selected {{ background: {P['card3']}; }}"
-                f"QMenu::separator {{ background: {P['border']}; height: 1px; margin: 4px 0; }}"
-            )
-            m.addAction("⬡  Debug Console", self._open_debug)
-            m.addSeparator()
-            m.addAction("↓  Export CSV", self._export_csv)
-            m.addSeparator()
-            m.addAction("🗑  Clear all jobs", self._clear_jobs)
-            m.exec(self._btn_more.mapToGlobal(self._btn_more.rect().bottomLeft()))
-        self._btn_settings.clicked.connect(self._open_settings)
-        self._btn_stats.clicked.connect(self._open_stats)
+        self._btn_settings    = _btn("⋮",           P['card2'],   P['card3'],    height=28, font_size=14, fixed_width=32)
+        self._btn_settings.setToolTip("Menu")
         self._btn_dismiss_all.clicked.connect(self._dismiss_visible)
-        self._btn_more.clicked.connect(_show_more_menu)
-        bot.addWidget(self._btn_settings)
-        bot.addWidget(self._btn_stats)
+        self._btn_settings.clicked.connect(self._open_menu)
         bot.addWidget(self._btn_dismiss_all, 1)
-        bot.addWidget(self._btn_more)
+        bot.addWidget(self._btn_settings)
         lay.addLayout(bot)
         return sb
 
@@ -608,8 +697,8 @@ class MainWindow(QMainWindow):
         self._btn_undo_dis.setToolTip("Undo last dismiss")
         self._btn_undo_dis.setEnabled(False)
         self._btn_rescore  = _btn("✦ Re-score",  P['purple_bg'], "#2a0e50",    height=34, color=P['purple'])
-        self._btn_bew_go   = _btn("📄 Bewerbung", P['card2'],    P['card3'],    height=34)
-        self._btn_bew_go.setToolTip("Switch to Bewerbung tab and create PDF  [B]")
+        self._btn_bew_go   = _btn("📄 Apply", P['card2'],    P['card3'],    height=34)
+        self._btn_bew_go.setToolTip("Switch to Application tab and create PDF  [B]")
         for b in (self._btn_open, self._btn_save, self._btn_dismiss,
                   self._btn_undo_dis, self._btn_rescore, self._btn_bew_go):
             ab.addWidget(b)
@@ -630,7 +719,7 @@ class MainWindow(QMainWindow):
                 "<tr><td><b>S</b></td><td>Save / Unsave</td></tr>"
                 "<tr><td><b>D</b></td><td>Dismiss</td></tr>"
                 "<tr><td><b>A</b></td><td>Mark as Applied</td></tr>"
-                "<tr><td><b>B</b></td><td>Bewerbung erstellen (PDF)</td></tr>"
+                "<tr><td><b>B</b></td><td>Create Application PDF</td></tr>"
                 "<tr><td><b>N</b></td><td>Notes tab</td></tr>"
                 "<tr><td><b>O</b></td><td>Open job in browser</td></tr>"
                 "<tr><td><b>↑ ↓</b></td><td>Navigate job list</td></tr>"
@@ -689,7 +778,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(desc_w, "Job Profile")
 
         # Bewerbung tab (PDF viewer)
-        self._tabs.addTab(self._build_bewerbung_tab(), "Bewerbung")
+        self._tabs.addTab(self._build_bewerbung_tab(), "Application")
 
         # Notes tab
         notes_w = QWidget(); notes_w.setStyleSheet(f"background: {P['card']};")
@@ -713,7 +802,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._tabs, 1)
         return panel
 
-    # ── Bewerbung PPTX tab ────────────────────────────────────────────────────
+    # ── Bewerbung LaTeX tab ───────────────────────────────────────────────────
 
     def _build_bewerbung_tab(self) -> QWidget:
         w = QWidget(); w.setStyleSheet(f"background: {P['card']};")
@@ -721,12 +810,12 @@ class MainWindow(QMainWindow):
 
         # ── top bar ──────────────────────────────────────────────────────────
         bar = QHBoxLayout(); bar.setSpacing(6)
-        self._lbl_pptx_path = _label("No template loaded", size=11, color=P['text3'])
-        self._lbl_pptx_path.setWordWrap(False)
-        btn_browse      = _btn("📂 Load Template", P['card2'],   P['card3'],    height=32, font_size=11)
-        self._btn_create = _btn("📄 Create PDF",   P['indigo'],  P['indigo_d'], height=32, font_size=11)
-        bar.addWidget(self._lbl_pptx_path, 1)
-        bar.addWidget(btn_browse)
+        _status = "📄 Application Documents" if self._latex_dir else "⚠ Application Documents folder not found"
+        _col    = P['text3'] if self._latex_dir else P['amber']
+        lbl_template = _label(_status, size=11, color=_col)
+        lbl_template.setWordWrap(False)
+        self._btn_create = _btn("📄 Create PDF", P['indigo'], P['indigo_d'], height=32, font_size=11)
+        bar.addWidget(lbl_template, 1)
         bar.addWidget(self._btn_create)
         lay.addLayout(bar); lay.addWidget(_sep())
 
@@ -769,8 +858,8 @@ class MainWindow(QMainWindow):
         act_lay = QHBoxLayout(self._bew_action_row)
         act_lay.setContentsMargins(0, 2, 0, 2); act_lay.setSpacing(6)
         self._lbl_bew_job_status = _label("", size=10, color=P['text3'])
-        self._btn_open_bew_folder  = _btn("📂 Ordner öffnen",       P['card2'], P['card3'], height=28, font_size=10)
-        self._btn_mark_applied_bew = _btn("✓ Als beworben markieren", P['green'], P['green'], height=28, font_size=10)
+        self._btn_open_bew_folder  = _btn("📂 Open Folder",       P['card2'], P['card3'], height=28, font_size=10)
+        self._btn_mark_applied_bew = _btn("✓ Mark as applied", P['green'], P['green'], height=28, font_size=10)
         act_lay.addWidget(self._lbl_bew_job_status, 1)
         act_lay.addWidget(self._btn_open_bew_folder)
         act_lay.addWidget(self._btn_mark_applied_bew)
@@ -780,12 +869,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(_sep())
 
         def _open_bew_folder():
-            folder = self._bew_out_dir
-            if not folder and self._pptx_path:
-                folder = os.path.join(os.path.dirname(self._pptx_path), "Bewerbungen")
-            if folder:
-                os.makedirs(folder, exist_ok=True)
-                os.startfile(folder)
+            folder = self._bew_out_dir or os.path.normpath(os.path.join(os.path.expanduser("~"), "Desktop", "Bewerbungen"))
+            os.makedirs(folder, exist_ok=True)
+            os.startfile(folder)
 
         def _mark_applied_from_bew():
             jid = self._current_bew_job_id
@@ -796,7 +882,7 @@ class MainWindow(QMainWindow):
                     self._cards[jid]._rebuild_tags()
                     self._cards[jid]._apply_style()
                 self._btn_mark_applied_bew.setEnabled(False)
-                self._btn_mark_applied_bew.setText("✓ Beworben")
+                self._btn_mark_applied_bew.setText("✓ Applied")
 
         self._btn_open_bew_folder.clicked.connect(_open_bew_folder)
         self._btn_mark_applied_bew.clicked.connect(_mark_applied_from_bew)
@@ -814,23 +900,14 @@ class MainWindow(QMainWindow):
         self._bew_scroll.setWidget(self._bew_page_container)
         lay.addWidget(self._bew_scroll, 1)
 
-        # ── load saved PPTX path ─────────────────────────────────────────────
-        saved = db.get_settings()["prefs"].get("cv_pptx_path", "")
-        if saved and os.path.isfile(saved):
-            self._pptx_path = saved
-            self._lbl_pptx_path.setText(os.path.basename(saved))
-            QTimer.singleShot(300, lambda: self._preview_template(saved))
+        # ── show lebenslauf preview on startup ───────────────────────────────
+        if self._latex_dir:
+            for _f in os.listdir(self._latex_dir) if os.path.isdir(self._latex_dir) else []:
+                if _f.lower().endswith(".pdf"):
+                    _pdf = os.path.join(self._latex_dir, _f)
+                    QTimer.singleShot(300, lambda p=_pdf: self._bew_pdf_ready.emit(p))
+                    break
 
-        def _browse():
-            path, _ = QFileDialog.getOpenFileName(self, "Select Bewerbung PPTX", "", "PowerPoint (*.pptx)")
-            if path:
-                self._pptx_path = path
-                self._lbl_pptx_path.setText(os.path.basename(path))
-                s = db.get_settings(); s["prefs"]["cv_pptx_path"] = path
-                db.save_settings(s["profile"], s["prefs"])
-                self._preview_template(path)
-
-        btn_browse.clicked.connect(_browse)
         self._btn_create.clicked.connect(self._create_application_pdf)
         return w
 
@@ -853,9 +930,9 @@ class MainWindow(QMainWindow):
             self._btn_mark_applied_bew.show()
             already = job.get("status") == "applied"
             self._btn_mark_applied_bew.setEnabled(not already)
-            self._btn_mark_applied_bew.setText("✓ Beworben" if already else "✓ Als beworben markieren")
+            self._btn_mark_applied_bew.setText("✓ Applied" if already else "✓ Mark as applied")
         else:
-            self._lbl_bew_job_status.setText("Noch keine Bewerbung erstellt")
+            self._lbl_bew_job_status.setText("No application created yet")
             self._lbl_bew_job_status.setStyleSheet(f"color: {P['text3']}; font-size: 10px;")
             self._btn_open_bew_folder.hide()
             self._btn_mark_applied_bew.hide()
@@ -915,28 +992,17 @@ class MainWindow(QMainWindow):
                 return p
         return None
 
-    def _preview_template(self, pptx_path: str):
-        self._bew_progress_sig.emit(-1, "Loading template preview…", os.path.basename(pptx_path))
-        def _work():
-            soffice = self._find_soffice()
-            if not soffice:
-                self._bew_progress_sig.emit(0, "Preview unavailable", "LibreOffice not found"); return
-            with tempfile.TemporaryDirectory() as tmp:
-                result = subprocess.run(
-                    [soffice, "--headless", "--convert-to", "pdf", "--outdir", tmp, pptx_path],
-                    capture_output=True, timeout=60,
-                )
-                base    = os.path.splitext(os.path.basename(pptx_path))[0]
-                tmp_pdf = os.path.join(tmp, base + ".pdf")
-                if result.returncode == 0 and os.path.isfile(tmp_pdf):
-                    fd, dest = tempfile.mkstemp(suffix=".pdf", prefix="bew_preview_")
-                    os.close(fd)
-                    shutil.copy2(tmp_pdf, dest)
-                    self._bew_progress_sig.emit(100, "Template loaded", os.path.basename(pptx_path))
-                    self._bew_pdf_ready.emit(dest)
-                else:
-                    self._bew_progress_sig.emit(0, "Preview error", "Could not convert template to PDF")
-        threading.Thread(target=_work, daemon=True).start()
+    def _find_pdflatex(self) -> str | None:
+        candidates = [
+            r"C:\Program Files\MiKTeX\miktex\bin\x64\pdflatex.exe",
+            r"C:\texlive\2024\bin\windows\pdflatex.exe",
+            r"C:\texlive\2023\bin\windows\pdflatex.exe",
+            "pdflatex",
+        ]
+        for p in candidates:
+            if os.path.isfile(p) or shutil.which(p):
+                return p
+        return None
 
     def _create_application_pdf(self):
         if self._bew_creating:
@@ -944,16 +1010,36 @@ class MainWindow(QMainWindow):
         job = self._selected
         if not job:
             QMessageBox.warning(self, "No Job Selected", "Please select a job first."); return
-        if not self._pptx_path or not os.path.isfile(self._pptx_path):
-            QMessageBox.warning(self, "No Template", "Please load a PPTX template first."); return
+        if not self._latex_dir or not os.path.isdir(self._latex_dir):
+            QMessageBox.warning(self, "No Folder Selected", "Please select the application folder first (📂 Select Folder)."); return
 
-        title   = job.get("title", "").upper()
+        title   = job.get("title", "") or "Position"
         today   = datetime.now().strftime("%d.%m.%Y")
-        company = (job.get("company") or "").replace("/", "-").replace("\\", "-") or "Bewerbung"
+        company = (job.get("company") or "").replace("/", "-").replace("\\", "-") or "Application"
+        def _to_latex(s: str) -> str:
+            return (s
+                .replace("&",  r"\&")
+                .replace("%",  r"\%")
+                .replace("#",  r"\#")
+                .replace("$",  r"\$")
+                .replace("{",  r"\{")
+                .replace("}",  r"\}")
+                .replace("~",  r"\textasciitilde{}")
+                .replace("^",  r"\textasciicircum{}")
+                .replace("_",  r"\_")
+                .replace("ä",  r'\"a').replace("Ä", r'\"A')
+                .replace("ö",  r'\"o').replace("Ö", r'\"O')
+                .replace("ü",  r'\"u').replace("Ü", r'\"U')
+                .replace("ß",  r'\ss{}')
+            )
+        title_latex = _to_latex(title)
 
-        out_dir = os.path.join(os.path.dirname(self._pptx_path), "Bewerbungen")
+        out_dir = os.path.normpath(os.path.join(
+            os.path.expanduser("~"), "Desktop", "Bewerbungen",
+            datetime.now().strftime("%Y-%m-%d")
+        ))
         os.makedirs(out_dir, exist_ok=True)
-        base_name = f"Bewerbung_{company}_{datetime.now().strftime('%Y-%m-%d')}"
+        base_name = f"Application_{company}_{datetime.now().strftime('%Y-%m-%d')}"
         out_path  = os.path.join(out_dir, base_name + ".pdf")
         counter   = 1
         while os.path.isfile(out_path):
@@ -966,60 +1052,100 @@ class MainWindow(QMainWindow):
         self._bew_creating = True
         self._btn_create.setEnabled(False)
 
-        replacements = {
-            "{{JOBTITEL}}":  title,
-            "{{ORT_DATUM}}": f"Flensburg den {today}",
-        }
-        pptx_src = self._pptx_path
+        latex_dir = self._latex_dir
 
         def _work():
+            _log_path = os.path.join(os.path.expanduser("~"), "Desktop", "ah_debug.txt")
+            def _log(msg):
+                with open(_log_path, "a", encoding="utf-8") as f:
+                    f.write(msg + "\n")
+
             try:
-                from pptx import Presentation
-            except ImportError:
-                self._bew_progress_sig.emit(0, "Error", "python-pptx not installed"); return
+                _log(f"=== CREATE PDF ===")
+                _work_inner(_log)
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                _log(f"EXCEPTION: {tb}")
+                self._bew_progress_sig.emit(0, "Error", tb[-400:])
+                self._bew_creating = False
 
-            self._bew_progress_sig.emit(15, "Loading template…", os.path.basename(pptx_src))
-            prs = Presentation(pptx_src)
+        def _work_inner(_log):
+            import fitz
 
-            self._bew_progress_sig.emit(35, "Replacing placeholders…", f"Job: {title[:55]}")
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if not shape.has_text_frame:
-                        continue
-                    for para in shape.text_frame.paragraphs:
-                        full = "".join(r.text for r in para.runs)
-                        replaced = full
-                        for ph, val in replacements.items():
-                            replaced = replaced.replace(ph, val)
-                        if replaced != full and para.runs:
-                            para.runs[0].text = replaced
-                            for r in para.runs[1:]:
-                                r.text = ""
+            pdflatex = self._find_pdflatex()
+            _log(f"pdflatex: {pdflatex}")
+            if not pdflatex:
+                self._bew_progress_sig.emit(0, "Error", "pdflatex not found — install MiKTeX/TeX Live"); return
 
-            soffice = self._find_soffice()
-            if not soffice:
-                self._bew_progress_sig.emit(0, "Error", "LibreOffice not found"); return
+            _log(f"latex_dir: {latex_dir}  exists={os.path.isdir(latex_dir)}")
+            if not os.path.isdir(latex_dir):
+                self._bew_progress_sig.emit(0, "Error", f"Folder not found: {latex_dir}"); return
 
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_pptx = os.path.join(tmp, "bew_tmp.pptx")
-                self._bew_progress_sig.emit(55, "Saving modified template…", "Writing PPTX…")
-                prs.save(tmp_pptx)
+            # Use fixed _work subfolder — avoids tempfile issues in frozen EXE
+            work = os.path.join(latex_dir, "_work")
+            if os.path.exists(work):
+                shutil.rmtree(work)
+            os.makedirs(work)
 
-                self._bew_progress_sig.emit(-1, "Converting to PDF…",
-                    "LibreOffice is rendering your application — this takes a few seconds…")
+            self._bew_progress_sig.emit(10, "Preparing…", "Copying files")
+            for entry in os.listdir(latex_dir):
+                if entry.startswith("_") or entry.lower() in ("applications", "bewerbungen"):
+                    continue
+                src_e = os.path.join(latex_dir, entry)
+                dst_e = os.path.join(work, entry)
+                if os.path.isfile(src_e):
+                    shutil.copy2(src_e, dst_e)
+                elif os.path.isdir(src_e):
+                    shutil.copytree(src_e, dst_e)
+            _log(f"work files: {os.listdir(work)}")
+
+            self._bew_progress_sig.emit(20, "Replacing placeholders…", title[:60])
+            for tex_name in ("deckblatt.tex", "anschreiben.tex"):
+                p = os.path.join(work, tex_name)
+                if not os.path.isfile(p):
+                    continue
+                src = open(p, encoding="utf-8").read()
+                src = src.replace("{{JOBTITEL}}", title_latex)
+                src = src.replace("{{DATUM}}", today)
+                open(p, "w", encoding="utf-8").write(src)
+
+            pdfs = []
+            for i, tex_name in enumerate(("deckblatt.tex", "anschreiben.tex", "lebenslauf.tex")):
+                tex_path = os.path.join(work, tex_name)
+                if not os.path.isfile(tex_path):
+                    _log(f"MISSING: {tex_name}")
+                    self._bew_progress_sig.emit(0, "Error", f"Missing: {tex_name}"); return
+                label = os.path.splitext(tex_name)[0].capitalize()
+                self._bew_progress_sig.emit(30 + i * 18, f"Compiling {label}…", tex_name)
                 result = subprocess.run(
-                    [soffice, "--headless", "--convert-to", "pdf", "--outdir", tmp, tmp_pptx],
-                    capture_output=True, timeout=90,
+                    [pdflatex, "-interaction=batchmode",
+                     "-output-directory", work, tex_path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=work, timeout=120,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                tmp_pdf = os.path.join(tmp, "bew_tmp.pdf")
-                if result.returncode != 0 or not os.path.isfile(tmp_pdf):
-                    err = result.stderr.decode(errors="ignore")[:120]
-                    self._bew_progress_sig.emit(0, "Conversion failed", err); return
+                pdf_out = os.path.join(work, os.path.splitext(tex_name)[0] + ".pdf")
+                _log(f"{tex_name}: rc={result.returncode} pdf={os.path.isfile(pdf_out)}")
+                if not os.path.isfile(pdf_out):
+                    err = result.stdout.decode(errors="ignore")[-400:]
+                    _log(f"STDOUT: {err}")
+                    self._bew_progress_sig.emit(0, f"pdflatex failed: {label}", err); return
+                pdfs.append(pdf_out)
 
-                self._bew_progress_sig.emit(90, "Saving PDF…", out_path)
-                shutil.copy2(tmp_pdf, out_path)
+            self._bew_progress_sig.emit(88, "Saving…", out_path)
+            merged = fitz.open()
+            for pdf_path in pdfs:
+                with fitz.open(pdf_path) as doc:
+                    merged.insert_pdf(doc)
+            merged.save(out_path)
+            merged.close()
 
-            self._bew_progress_sig.emit(100, "✔  Application ready!", os.path.basename(out_path))
+            shutil.rmtree(work, ignore_errors=True)
+
+            self._bew_progress_sig.emit(100, "✔  Done!", os.path.basename(out_path))
             self._bew_pdf_ready.emit(out_path)
 
         threading.Thread(target=_work, daemon=True).start()
@@ -1083,6 +1209,7 @@ class MainWindow(QMainWindow):
 
     def _load_jobs(self):
         cat = None if self._filter_cat in ("All", "All Categories") else self._filter_cat.lower()
+        status_filter = self._saved_sub_filter if self._view == "saved" and self._saved_sub_filter else self._quick_status
         self._jobs = db.get_jobs(
             min_score=self._score_slider.value(),
             category=cat,
@@ -1092,9 +1219,13 @@ class MainWindow(QMainWindow):
             sort=self._sort_combo.currentData(),
             ai_only=self._chk_ai_only.isChecked(),
             new_only=self._quick_new_only,
-            status_filter=self._quick_status,
+            unviewed_only=self._quick_unviewed,
+            status_filter=status_filter,
+            workspace=self._workspace,
         )
-        self._lbl_funnel.setText(self._funnel_html(db.get_pipeline_counts()))
+        counts = db.get_pipeline_counts()
+        self._lbl_funnel.setText(self._funnel_html(counts))
+        self._lbl_applied_count.setText(f"✓  {counts.get('applied', 0)}  APPLIED")
         self._render_list()
         self._total_jobs_cache = len(db.get_jobs(show_dismissed=True))
         col = P['amber'] if self._total_jobs_cache > 0 else P['text3']
@@ -1109,6 +1240,10 @@ class MainWindow(QMainWindow):
         )
 
     def _render_list(self):
+        sb = self._scroll.verticalScrollBar()
+        _saved_scroll = sb.value()
+        _had_selected = self._selected is not None
+
         while self._list_layout.count() > 1:
             item = self._list_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -1132,6 +1267,9 @@ class MainWindow(QMainWindow):
         ids = {j["id"] for j in self._jobs}
         if self._jobs and (self._selected is None or self._selected["id"] not in ids):
             self._select(self._jobs[0])
+        elif _had_selected and self._selected and self._selected["id"] in self._cards:
+            # restore scroll position — don't jump to top when list updates during AI scoring
+            QTimer.singleShot(0, lambda: sb.setValue(_saved_scroll))
 
     # ── selection & detail ────────────────────────────────────────────────────
 
@@ -1146,6 +1284,7 @@ class MainWindow(QMainWindow):
         self._selected = job
         if job["id"] in self._cards:
             self._cards[job["id"]].set_selected(True)
+            self._scroll.ensureWidgetVisible(self._cards[job["id"]])
         self._show_detail(job)
         self._maybe_fetch_desc(job)
         self._update_bew_status()
@@ -1428,10 +1567,14 @@ class MainWindow(QMainWindow):
         self._btn_ai_cancel.setEnabled(False)
         scored = ai_score_engine.ai_score_status.get("scored", 0)
         _log_activity(f"AI scoring complete — {scored} jobs updated", "info")
+        # Disable new-only filter so AI-scored jobs from previous searches become visible
+        self._chip_new.setChecked(False)
+        self._quick_new_only = False
         self._load_jobs()
+        self._update_filter_btn()
         if scored > 0:
             self._tray.showMessage(
-                "AutoApply", f"AI scoring complete — {scored} jobs rated!",
+                "Application Helper", f"AI scoring complete — {scored} jobs rated!",
                 QSystemTrayIcon.MessageIcon.Information, 4000,
             )
 
@@ -1454,8 +1597,15 @@ class MainWindow(QMainWindow):
             self._ai_progress.setFormat(f"  ✦ {done}/{total}  ·  {pct}%")
             self._btn_ai_cancel.setEnabled(True)
             self._btn_ai_start.setEnabled(False)
-            eta_m, eta_s2 = divmod(eta_s, 60)
-            self._lbl_ai_eta.setText(f"ETA {eta_m}:{eta_s2:02d}")
+            if eta_s >= 3600:
+                eta_h, eta_rem = divmod(eta_s, 3600)
+                eta_m2 = eta_rem // 60
+                self._lbl_ai_eta.setText(f"ETA {eta_h}h {eta_m2}m")
+            elif eta_s >= 60:
+                eta_m, eta_s2 = divmod(eta_s, 60)
+                self._lbl_ai_eta.setText(f"ETA {eta_m}m {eta_s2:02d}s")
+            else:
+                self._lbl_ai_eta.setText(f"ETA {eta_s}s")
             self._slbl(self._lbl_ai_phase, f"✦ {current}" if current else "✦ scoring…", P['purple'])
         elif phase == "done":
             scored = st.get("scored", 0)
@@ -1493,9 +1643,6 @@ class MainWindow(QMainWindow):
             self._progress.setFormat("  READY"),
         ))
         self._run_auto_dismiss()
-        n_empty = db.dismiss_empty_description_jobs()
-        if n_empty > 0:
-            _log_activity(f"Auto-dismissed {n_empty} jobs without description", "db")
         if saved > 0:
             self._chip_new.setChecked(True)
             self._quick_new_only = True
@@ -1504,8 +1651,9 @@ class MainWindow(QMainWindow):
             self._score_slider.blockSignals(False)
             self._lbl_min_score.setText("MIN SCORE  40")
         self._load_jobs(); self._update_last_search_label()
+        self._update_filter_btn()
         if saved > 0:
-            self._tray.showMessage("AutoApply", f"Search complete — {saved} new jobs found!",
+            self._tray.showMessage("Application Helper", f"Search complete — {saved} new jobs found!",
                                    QSystemTrayIcon.MessageIcon.Information, 4000)
         if self._ai_auto_enabled:
             QTimer.singleShot(2000, self._start_ai_scoring)
@@ -1567,21 +1715,94 @@ class MainWindow(QMainWindow):
     def _on_score_slider(self, value: int):
         self._lbl_min_score.setText(f"MIN SCORE  {value}")
         self._load_jobs()
+        self._update_filter_btn()
 
     def _on_view_change(self, view: str):
-        self._view = view.lower(); self._load_jobs()
+        self._view = view.lower()
+        if self._view == "saved":
+            self._fp_saved_sub.show()
+            self._fp_chips_row.hide()
+        else:
+            self._fp_saved_sub.hide()
+            self._fp_chips_row.show()
+            self._saved_sub_filter = ""
+        self._btn_filter_toggle.setChecked(False)
+        self._filter_panel.hide()
+        self._load_jobs()
+
+    def _on_saved_sub(self, sub: str):
+        self._saved_sub_filter = sub
+        self._sfchip_all.setChecked(sub == "")
+        self._sfchip_pending.setChecked(sub == "!applied")
+        self._sfchip_applied.setChecked(sub == "applied")
+        self._sfchip_interview.setChecked(sub == "interview")
+        self._load_jobs()
 
     def _on_filter(self, *_):
         self._filter_cat     = self._cat_combo.currentText()
         self._show_dismissed = self._chk_dismissed.isChecked()
         self._load_jobs()
+        self._update_filter_btn()
 
     def _on_chip_new(self):
         self._quick_new_only = self._chip_new.isChecked()
         self._load_jobs()
+        self._update_filter_btn()
+
+    def _on_chip_unviewed(self):
+        self._quick_unviewed = self._chip_unviewed.isChecked()
+        self._load_jobs()
+        self._update_filter_btn()
 
     def _on_chip_interview(self):
         self._quick_status = "interview" if self._chip_interview.isChecked() else ""
+        self._load_jobs()
+        self._update_filter_btn()
+
+    def _toggle_filter_panel(self):
+        self._filter_panel.setVisible(self._btn_filter_toggle.isChecked())
+
+    def _update_filter_btn(self):
+        n = sum([
+            self._chip_new.isChecked(),
+            self._chip_unviewed.isChecked(),
+            self._chip_interview.isChecked(),
+            bool(self._search_input.text().strip()),
+            self._cat_combo.currentIndex() > 0,
+            self._score_slider.value() > 0,
+            self._chk_dismissed.isChecked(),
+            self._chk_ai_only.isChecked(),
+        ])
+        self._btn_filter_toggle.setText(f"Filters ({n})" if n else "Filters")
+
+    def _refresh_workspaces(self):
+        workspaces = db.get_workspaces()
+        self._workspace_combo.blockSignals(True)
+        self._workspace_combo.clear()
+        self._workspace_combo.addItem("All", "")
+        for ws in workspaces:
+            self._workspace_combo.addItem(ws, ws)
+        self._workspace_combo.addItem("＋ New…", "__new__")
+        idx = self._workspace_combo.findData(self._workspace)
+        self._workspace_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        self._workspace_combo.blockSignals(False)
+
+    def _on_workspace_change(self, text: str):
+        data = self._workspace_combo.currentData()
+        if data == "__new__":
+            from PyQt6.QtWidgets import QInputDialog
+            name, ok = QInputDialog.getText(self, "New Workspace", "Workspace name:")
+            if ok and name.strip():
+                self._workspace = name.strip()
+                search_engine.current_workspace = self._workspace
+                self._refresh_workspaces()
+                self._load_jobs()
+            else:
+                # revert to previous
+                self._refresh_workspaces()
+            return
+        self._workspace = data  # "" = all workspaces
+        search_engine.current_workspace = self._workspace or "default"
         self._load_jobs()
 
     def _run_auto_dismiss(self):
@@ -1708,13 +1929,33 @@ class MainWindow(QMainWindow):
 
     # ── dialogs ───────────────────────────────────────────────────────────────
 
+    def _open_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {P['card2']}; color: {P['text']}; "
+            f"border: 1px solid {P['border2']}; border-radius: 8px; padding: 4px; "
+            f"font-size: 12px; }}"
+            f"QMenu::item {{ padding: 7px 18px; border-radius: 4px; }}"
+            f"QMenu::item:selected {{ background: {P['indigo_bg']}; color: {P['indigo']}; }}"
+            f"QMenu::separator {{ height: 1px; background: {P['border']}; margin: 4px 8px; }}"
+        )
+        menu.addAction("📊  Statistics",     self._open_stats)
+        menu.addSeparator()
+        menu.addAction("⚙  Settings",       self._open_settings)
+        menu.addAction("🐛  Debug Console",  self._open_debug)
+        menu.addSeparator()
+        menu.addAction("📤  Export CSV",     self._export_csv)
+        menu.addAction("🗑  Clear all jobs", self._clear_jobs)
+        btn = self._btn_settings
+        menu.exec(btn.mapToGlobal(btn.rect().topLeft()))
+
     def _open_stats(self):
         StatsDialog(self).exec()
 
     def _open_debug(self):
         if self._debug_win is None:
-            self._debug_win = DebugWindow(self)
-        self._debug_win.show(); self._debug_win.raise_(); self._debug_win.activateWindow()
+            self._debug_win = DebugWindow()  # no parent → separate taskbar entry
+        self._debug_win.showNormal(); self._debug_win.raise_(); self._debug_win.activateWindow()
 
     def _open_settings(self):
         SettingsDialog(self).exec()
@@ -1832,7 +2073,7 @@ class SettingsDialog(QDialog):
         self._f_ai_score_prompt.setPlainText(prefs.get("ai_score_prompt", "") or _DEFAULT_CUSTOM)
         self._f_ai_score_prompt.setFixedHeight(120)
         _pref_row("AI Scorer Prompt", self._f_ai_score_prompt,
-                  hint="Zusätzliche Anweisungen für die KI beim Bewerten von Jobs (optional).")
+                  hint="Additional instructions for the AI when scoring jobs (optional).")
 
         self._f_model = QLineEdit(prefs.get("ollama_model", "qwen2.5:14b"))
         _pref_row("Ollama model", self._f_model)
@@ -1845,8 +2086,8 @@ class SettingsDialog(QDialog):
         _pref_row("Auto-Search interval", self._f_auto)
 
         self._f_ai_min_score = QLineEdit(str(prefs.get("ai_min_score", 40)))
-        _pref_row("AI Scoring — Mindest-Regel-Score", self._f_ai_min_score,
-                  hint="Nur Jobs mit Regel-Score ≥ X werden von der KI bewertet.")
+        _pref_row("AI Scoring — Min. Rule Score", self._f_ai_min_score,
+                  hint="Only jobs with rule score ≥ X will be AI-scored.")
 
         _DISMISS_OPTS = ["Off", "7 days", "14 days", "30 days", "60 days", "90 days"]
         _DISMISS_VALS = [0, 7, 14, 30, 60, 90]
@@ -1854,9 +2095,79 @@ class SettingsDialog(QDialog):
         try: self._f_dismiss.setCurrentIndex(_DISMISS_VALS.index(int(prefs.get("auto_dismiss_days", 0))))
         except ValueError: self._f_dismiss.setCurrentIndex(0)
         _pref_row("Auto-dismiss jobs older than", self._f_dismiss,
-                  hint="Jobs mit Status 'new' älter als X Tage werden automatisch ausgeblendet.")
+                  hint="Jobs with status 'new' older than X days are automatically dismissed.")
 
         tabs.addTab(ai_w, "AI / Preferences")
+
+        # ── Sources tab ──────────────────────────────────────────────────────
+        src_w = QWidget(); src_w.setStyleSheet(f"background: {P['card']};")
+        src_l = QVBoxLayout(src_w); src_l.setContentsMargins(20, 20, 20, 20); src_l.setSpacing(12)
+
+        def _src_row(title, widget, hint=None):
+            src_l.addWidget(_label(title, size=11, color=P['text2'], bold=True))
+            if hint: src_l.addWidget(_label(hint, size=10, color=P['text3']))
+            src_l.addWidget(widget); src_l.addWidget(_sep())
+
+        src_l.addWidget(_label("Job Sources — API Keys", size=13, color=P['text'], bold=True))
+        src_l.addWidget(_sep())
+
+        self._f_adzuna_id  = QLineEdit(prefs.get("adzuna_app_id", ""))
+        self._f_adzuna_id.setPlaceholderText("Adzuna App ID")
+        _src_row("Adzuna App ID", self._f_adzuna_id,
+                 hint="developer.adzuna.com → free 100 req/day")
+
+        self._f_adzuna_key = QLineEdit(prefs.get("adzuna_app_key", ""))
+        self._f_adzuna_key.setPlaceholderText("Adzuna App Key")
+        self._f_adzuna_key.setEchoMode(QLineEdit.EchoMode.Password)
+        _src_row("Adzuna App Key", self._f_adzuna_key)
+
+        src_l.addWidget(_label("Jobicy: no key needed (free, auto-enabled)", size=10, color=P['green']))
+        src_l.addStretch()
+        tabs.addTab(src_w, "Sources")
+
+        # ── Tools tab ────────────────────────────────────────────────────────
+        tools_w = QWidget(); tools_l = QVBoxLayout(tools_w)
+        tools_l.setContentsMargins(20, 20, 20, 20); tools_l.setSpacing(10)
+        tools_l.addWidget(_label("Tools", size=13, color=P['text'], bold=True))
+        tools_l.addWidget(_sep())
+
+        def _tools_btn(label, fn, danger=False):
+            bg = P['red_bg'] if danger else P['card2']
+            ho = P['red'] + "33" if danger else P['card3']
+            b = _btn(label, bg, ho)
+            b.clicked.connect(fn)
+            tools_l.addWidget(b)
+
+        mw = self.parent()
+        _tools_btn("⬡  Debug Console",  mw._open_debug)
+        _tools_btn("↓  Export CSV",      mw._export_csv)
+        tools_l.addWidget(_sep())
+
+        def _rescore():
+            import app.db as _db
+            n = _db.rescore_all_jobs()
+            mw._load_jobs()
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Re-Score", f"{n} jobs re-scored.")
+
+        def _reset_ai():
+            from PyQt6.QtWidgets import QMessageBox
+            if QMessageBox.question(self, "Reset AI scores",
+                "Reset AI scores for all jobs?\nAll jobs can be re-scored afterwards.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            import app.db as _db
+            n = _db.reset_ai_scores()
+            mw._load_jobs()
+            QMessageBox.information(self, "Reset AI scores", f"{n} AI scores reset.")
+
+        _tools_btn("⟳  Re-Score all jobs (Rule)", _rescore)
+        _tools_btn("✦  Reset AI scores", _reset_ai)
+        tools_l.addWidget(_sep())
+        _tools_btn("🗑  Clear all jobs", mw._clear_jobs, danger=True)
+        tools_l.addStretch()
+        tabs.addTab(tools_w, "Tools")
 
         btn_row = QHBoxLayout(); btn_row.addStretch()
         cancel = _btn("Cancel", P['card2'], P['card3']); cancel.clicked.connect(self.reject)
@@ -1876,20 +2187,22 @@ class SettingsDialog(QDialog):
             "auto_search_hours": _AUTO_VALS[self._f_auto.currentIndex()],
             "auto_dismiss_days": _DISMISS_VALS[self._f_dismiss.currentIndex()],
             "ai_min_score":      max(0, min(100, int(self._f_ai_min_score.text() or "40") if self._f_ai_min_score.text().strip().lstrip('-').isdigit() else 40)),
+            "adzuna_app_id":     self._f_adzuna_id.text().strip(),
+            "adzuna_app_key":    self._f_adzuna_key.text().strip(),
         }
         db.save_settings(profile, prefs)
         import backend.services.llm_service as svc
         lines = [
-            f"Bewerber: {profile.get('name','')}",
-            f"Abschluss: {profile.get('degree','')}",
-            f"Hintergrund: {profile.get('background','')}",
+            f"Applicant: {profile.get('name','')}",
+            f"Degree: {profile.get('degree','')}",
+            f"Background: {profile.get('background','')}",
             f"Motivation: {profile.get('motivation','')}",
         ]
         ctx = "\n".join(l for l in lines if l.strip())
         svc._PROFILE_CONTEXT = ctx
         svc._SYSTEM_PROMPT = (
-            f"Du bist ein Bewerbungsassistent. Du kennst das folgende Bewerber-Profil:\n\n{ctx}\n\n"
-            f"Antworte immer auf Deutsch. Sei präzise und halte dich an das geforderte Format."
+            f"You are a job application assistant. You know the following applicant profile:\n\n{ctx}\n\n"
+            f"Always reply in English. Be precise and follow the required format."
         )
         self.accept()
 
@@ -1898,8 +2211,8 @@ class SettingsDialog(QDialog):
 
 class DebugWindow(QWidget):
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("AutoApply  ·  Debug Console")
+        super().__init__(None, Qt.WindowType.Window)  # no parent → own taskbar entry
+        self.setWindowTitle("Application Helper  ·  Debug Console")
         self.resize(1000, 740); self.setMinimumSize(800, 600)
         self.setStyleSheet(f"QWidget {{ background: {P['bg']}; }}")
         self._tick = 0; self._dot_state = True
@@ -1913,6 +2226,20 @@ class DebugWindow(QWidget):
         self._prev_llm_count = 0
         self._refresh()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            import ctypes, sys as _sys
+            if _sys.platform == "win32":
+                hwnd = int(self.winId())
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+                style = (style | 0x00040000) & ~0x00000080  # WS_EX_APPWINDOW, ~WS_EX_TOOLWINDOW
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, style)
+                ctypes.windll.user32.ShowWindow(hwnd, 0)   # hide
+                ctypes.windll.user32.ShowWindow(hwnd, 9)   # restore
+        except Exception:
+            pass
+
     def _build(self):
         root = QVBoxLayout(self); root.setContentsMargins(20, 16, 20, 16); root.setSpacing(12)
 
@@ -1921,7 +2248,9 @@ class DebugWindow(QWidget):
         title.setStyleSheet(f"color: {P['text']}; font-size: 13px; font-weight: 700; letter-spacing: 2px;")
         hdr.addWidget(title); hdr.addStretch()
         self._lbl_dot  = _label("●  LIVE", size=10, color=P['green'])
-        self._lbl_time = _label("", size=10, color=P['text3'])
+        self._lbl_time = _mono("", size=10, color=P['text3'])
+        self._lbl_time.setFixedWidth(148)
+        self._lbl_time.setAlignment(Qt.AlignmentFlag.AlignRight)
         hdr.addWidget(self._lbl_dot); hdr.addSpacing(14); hdr.addWidget(self._lbl_time)
         root.addLayout(hdr); root.addWidget(_sep())
 
@@ -1964,7 +2293,16 @@ class DebugWindow(QWidget):
         dh = QHBoxLayout()
         dh.addWidget(_label("AI DECISIONS", size=11, color=P['text3'], bold=True)); dh.addStretch()
         self._lbl_ai_dec_count = _label("0 scored", size=11, color=P['purple'])
-        dh.addWidget(self._lbl_ai_dec_count); aid_l.addLayout(dh)
+        btn_clear_ai = _btn("Clear", P['card2'], P['card3'], height=22, font_size=10)
+        def _clear_ai_decisions():
+            from app.ai_score_engine import _decisions
+            _decisions.clear()
+            self._txt_ai_dec.clear()
+            self._lbl_ai_dec_count.setText("0 scored")
+        btn_clear_ai.clicked.connect(_clear_ai_decisions)
+        dh.addSpacing(6); dh.addWidget(self._lbl_ai_dec_count)
+        dh.addSpacing(6); dh.addWidget(btn_clear_ai)
+        aid_l.addLayout(dh)
         self._txt_ai_dec = QTextEdit(); self._txt_ai_dec.setReadOnly(True)
         self._txt_ai_dec.setStyleSheet(
             f"QTextEdit {{ background: {P['card2']}; border: 1px solid {P['border']}; "
@@ -2045,7 +2383,14 @@ class DebugWindow(QWidget):
         a[0].setText(f"AI: {'● RUNNING' if ast['running'] else '○ ' + ast['phase']}  ·  LLM: {len(log)} calls")
         a[0].setStyleSheet(f"color: {P['purple'] if ast['running'] else P['text3']}; font-size: 12px;")
         eta = ast['eta_s']
-        eta_str = f"ETA {eta//60}:{eta%60:02d}" if eta > 0 else f"avg {ast.get('avg_s', 0):.1f}s"
+        if eta >= 3600:
+            eta_str = f"ETA {eta//3600}h {(eta%3600)//60}m"
+        elif eta >= 60:
+            eta_str = f"ETA {eta//60}m {eta%60:02d}s"
+        elif eta > 0:
+            eta_str = f"ETA {eta}s"
+        else:
+            eta_str = f"avg {ast.get('avg_s', 0):.1f}s"
         a[1].setText(f"Scored: {ast.get('scored', 0)}/{ast['total']}  ·  {eta_str}")
         a[1].setStyleSheet(f"color: {P['text2']}; font-size: 12px;")
         last_txt = f"{last['purpose'][:22]}  ({last['duration_s']}s)" if last else "no calls yet"
@@ -2136,9 +2481,12 @@ class DebugWindow(QWidget):
                 f'<span style="color:{P["text3"]};font-size:10px;">&nbsp;&nbsp;&nbsp;{d["reason"][:90]}'
                 f' &nbsp;<i>({d["time_s"]}s)</i></span>'
             )
+        sb2 = self._txt_ai_dec.verticalScrollBar()
+        _prev_scroll = sb2.value()
+        _at_top = _prev_scroll <= sb2.minimum() + 4
         self._txt_ai_dec.setHtml("<br>".join(dec_parts) or
             f'<span style="color:{P["text3"]};">No AI decisions yet.</span>')
-        sb2 = self._txt_ai_dec.verticalScrollBar(); sb2.setValue(sb2.minimum())
+        sb2.setValue(sb2.minimum() if _at_top else _prev_scroll)
 
         # render activity log
         COLOR = {"search": P['indigo'], "sys": P['green'], "db": P['amber'], "info": P['text2']}
@@ -2157,8 +2505,8 @@ class DebugWindow(QWidget):
 def _profile_text(profile: dict) -> str:
     lines = [
         f"Name: {profile.get('name', '')}",
-        f"Abschluss: {profile.get('degree', '')}",
-        f"Hintergrund: {profile.get('background', '')}",
+        f"Degree: {profile.get('degree', '')}",
+        f"Background: {profile.get('background', '')}",
         f"Motivation: {profile.get('motivation', '')}",
     ]
     return "\n".join(l for l in lines if not l.endswith(": "))
@@ -2191,7 +2539,7 @@ def _make_app_icon() -> QIcon:
 def run():
     import sys
     init_db()
-    _log_activity("AutoApply started", "info")
+    _log_activity("Application Helper started", "info")
     _log_activity("Database initialized", "db")
     _log_activity("UI loaded — waiting for commands", "sys")
     app = QApplication.instance() or QApplication(sys.argv)
